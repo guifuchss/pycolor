@@ -1,0 +1,70 @@
+import tkinter as tk
+from tkinter import filedialog, messagebox
+from colour.io import read_LUT
+
+# Função para abrir a janela de seleção de arquivo
+def select_lut():
+    lut_path = filedialog.askopenfilename(title="Selecionar LUT", filetypes=[("LUT files", "*.cube"), ("Todos os Arquivos", "*.*")])
+    if lut_path:
+        messagebox.showinfo("LUT Selecionado", f"LUT carregado: {lut_path}")
+        display_lut_info(lut_path)
+    else:
+        messagebox.showwarning("Nenhuma LUT Selecionada", "Nenhuma LUT foi selecionada.")
+
+# Função para exibir informações do LUT no terminal
+# Função para exibir informações adicionais do LUT no terminal
+def display_lut_info(lut_path):
+    try:
+        lut = read_LUT(lut_path)
+        # Exibindo informações no terminal
+        print(f"Nome do LUT: {lut.name}")
+        print(f"Tamanho da Tabela: {lut.table.shape}")
+        print(f"Espaço de Cor do LUT: {lut.domain}")
+        print(f"Intervalo de valores do LUT (Min, Max): {lut.table.min()}, {lut.table.max()}")
+        
+        # Verifica se é uma LUT 3D e outras propriedades específicas
+        if lut.table.ndim == 4:
+            print(f"Tipo: LUT 3D")
+        else:
+            print(f"Tipo: LUT 1D")
+
+        # Interpolação usada (a interpolação geralmente é definida durante a aplicação, mas você pode verificar isso no contexto)
+        print("Interpolação usada: Linear (pode ser alterada para Tetraédrica, se necessário)")
+
+        print(f"Quantidade de pontos do LUT: {lut.table.size}")
+        print(f"Domínio do LUT: {lut.domain}")
+        
+        # Verificar metadados se disponíveis
+        if hasattr(lut, 'metadata'):
+            print(f"Metadados: {lut.metadata}")
+        
+        # Checar se a LUT corrige exposição, gama, etc.
+        if lut.table.min() < 0 or lut.table.max() > 1:
+            print("Este LUT pode estar ajustando exposição, gama ou outros parâmetros de cor.")
+        else:
+            print("Este LUT parece ser uma transformação de espaço de cor ou ajuste leve.")
+
+        # Exibir intervalo de cada canal RGB individualmente
+        r_min, r_max = lut.table[..., 0].min(), lut.table[..., 0].max()
+        g_min, g_max = lut.table[..., 1].min(), lut.table[..., 1].max()
+        b_min, b_max = lut.table[..., 2].min(), lut.table[..., 2].max()
+        print(f"Intervalo de R: {r_min}, {r_max}")
+        print(f"Intervalo de G: {g_min}, {g_max}")
+        print(f"Intervalo de B: {b_min}, {b_max}")
+
+        print("LUT completo lido com sucesso.")
+
+    except Exception as e:
+        messagebox.showerror("Erro", f"Erro ao ler o LUT: {e}")
+
+
+
+# Configuração da janela gráfica
+root = tk.Tk()
+root.title("Selecione um LUT para Analisar")
+
+# Botão para abrir a janela de seleção de arquivo
+btn_select_lut = tk.Button(root, text="Selecionar LUT", command=select_lut)
+btn_select_lut.pack(pady=20)
+
+root.mainloop()

@@ -1,0 +1,431 @@
+import os
+import glob
+import cv2
+import numpy as np
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+from torchvision import transforms
+from PIL import Image, ImageOps
+import tkinter as tk
+from tkinter import filedialog, messagebox
+
+# Variáveis para armazenar as seleções do usuário
+data_src_path = ''
+data_dst_path = ''
+checkpoint_path = ''
+start_new_model = False
+
+# Função para carregar modelo existente
+def load_model():
+    global checkpoint_path, start_new_model
+    checkpoint_path = filedialog.askopenfilename(title="Selecionar Modelo", filetypes=[("Modelos PyTorch", "*.pth"), ("Todos os Arquivos", "*.*")])
+    if checkpoint_path:
+        messagebox.showinfo("Modelo Carregado", f"Modelo carregado: {checkpoint_path}")
+        start_new_model = False
+    else:
+        messagebox.showwarning("Nenhum Modelo Selecionado", "Nenhum modelo foi selecionado.")
+
+# Função para criar um novo modelo
+def create_new_model():
+    global start_new_model, checkpoint_path
+    start_new_model = True
+    # Abrir diálogo para salvar o modelo
+    checkpoint_path = filedialog.asksaveasfilename(title="Salvar Novo Modelo", defaultextension=".pth", filetypes=[("Modelos PyTorch", "*.pth"), ("Todos os Arquivos", "*.*")])
+    if checkpoint_path:
+        messagebox.showinfo("Novo Modelo", f"O modelo será salvo em: {checkpoint_path}")
+    else:
+        messagebox.showwarning("Nenhum Caminho Selecionado", "Nenhum local foi selecionado para salvar o modelo.")
+
+# Função para selecionar a pasta source
+def select_source_folder():
+    global data_src_path
+    data_src_path = filedialog.askdirectory(title="Selecionar Pasta Source")
+    if data_src_path:
+        messagebox.showinfo("Pasta Source Selecionada", f"Pasta source: {data_src_path}")
+    else:
+        messagebox.showwarning("Nenhuma Pasta Selecionada", "Nenhuma pasta source foi selecionada.")
+
+# Função para selecionar a pasta destino
+def select_destination_folder():
+    global data_dst_path
+    data_dst_path = filedialog.askdirectory(title="Selecionar Pasta Destino")
+    if data_dst_path:
+        messagebox.showinfo("Pasta Destino Selecionada", f"Pasta destino: {data_dst_path}")
+    else:
+        messagebox.showwarning("Nenhuma Pasta Selecionada", "Nenhuma pasta destino foi selecionada.")
+
+def start_training():
+    if not data_src_path or not data_dst_path:
+        messagebox.showerror("Informação Faltando", "Por favor, selecione as pastas source e destino.")
+        return
+    if not checkpoint_path:
+        messagebox.showerror("Informação Faltando", "Por favor, escolha carregar um modelo ou criar um novo.")
+        return
+    # Fechar a janela e continuar
+    root.destroy()
+
+# Criar a janela principal
+root = tk.Tk()
+root.title("Opções de Treinamento CycleGAN")
+
+# Criar botões e labels
+btn_load_model = tk.Button(root, text="Carregar Modelo", command=load_model)
+btn_create_model = tk.Button(root, text="Criar Novo Modelo", command=create_new_model)
+btn_source_folder = tk.Button(root, text="Selecionar Pasta Source", command=select_source_folder)
+btn_destination_folder = tk.Button(root, text="Selecionar Pasta Destino", command=select_destination_folder)
+btn_start_training = tk.Button(root, text="Iniciar Treinamento", command=start_training)
+
+btn_load_model.pack(pady=5)
+btn_create_model.pack(pady=5)
+btn_source_folder.pack(pady=5)
+btn_destination_folder.pack(pady=5)
+btn_start_training.pack(pady=20)
+
+# Iniciar o loop da interface gráfica
+root.mainloop()
+
+# Agora, continuamos com o resto do código usando as variáveis definidas pelo usuário
+
+# Definir as dimensões fixas
+fixed_height = 540  # Ajuste este valor conforme necessário
+fixed_width = 960   # Ajuste este valor conforme necessário
+
+# Definir o método de reamostragem (resample)
+try:
+    resample_method = Image.Resampling.LANCZOS  # Pillow >= 9.1.0
+except AttributeError:
+    resample_method = Image.LANCZOS  # Versões anteriores do Pillow
+
+# Definir a transformação personalizada
+class ResizeAndPad:
+    def __init__(self, height, width):
+        self.height = height
+        self.width = width
+
+    def __call__(self, img):
+        img = img.resize((self.width, self.height), resample=resample_method)
+        return img
+
+# Definir as transformações das imagens
+transform = transforms.Compose([
+    ResizeAndPad(fixed_height, fixed_width),
+    transforms.ToTensor(),
+    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),  # Normalizar para [-1, 1] com 3 canais
+])
+
+# Criar um Dataset personalizado
+class ImageDataset(Dataset):
+    def __init__(self, folder_A, folder_B, transform=None):
+        self.transform = transform
+
+        self.files_A = glob.glob(os.path.join(folder_A, '*.jpg')) + \
+                       glob.glob(os.path.join(folder_A, '*.png'))
+        self.files_B = glob.glob(os.path.join(folder_B, '*.jpg')) + \
+                       glob.glob(os.path.join(folder_B, '*.png'))
+
+        if len(self.files_A) == 0:
+            raise FileNotFoundError('Nenhuma imagem encontrada em data_src (Domínio A)')
+        if len(self.files_B) == 0:
+            raise FileNotFoundError('Nenhuma imagem encontrada em data_dst (Domínio B)')
+
+        self.len_A = len(self.files_A)
+        self.len_B = len(self.files_B)
+        self.len = max(self.len_A, self.len_B)
+
+    def __len__(self):
+        return self.len
+
+    def __getitem__(self, idx):
+        img_A = Image.open(self.files_A[idx % self.len_A]).convert('RGB')
+        img_B = Image.open(self.files_B[idx % self.len_B]).convert('RGB')
+
+        if self.transform:
+            img_A = self.transform(img_A)
+            img_B = self.transform(img_B)
+
+        return {'A': img_A, 'B': img_B}
+
+def save_image(image):
+    root = tk.Tk()
+    root.withdraw()  # Oculta a janela principal do tkinter
+    file_path = filedialog.asksaveasfilename(defaultextension=".png",
+                                             filetypes=[("PNG files", "*.png"),
+                                                        ("JPEG files", "*.jpg"),
+                                                        ("TIFF files", "*.tiff"),
+                                                        ("All files", "*.*")])
+    if file_path:
+        image.save(file_path)
+        print(f'Imagem salva em {file_path}')
+    else:
+        print('Ação de salvar imagem cancelada.')
+
+# Instanciar o dataset e o dataloader
+dataset = ImageDataset(data_src_path, data_dst_path, transform=transform)
+dataloader = DataLoader(dataset, batch_size=1, shuffle=True, num_workers=0)
+
+class Generator(nn.Module):
+    def __init__(self):
+        super(Generator, self).__init__()
+        self.main = nn.Sequential(
+            nn.Conv2d(3, 64, kernel_size=1, stride=1, padding=0),  # Ajuste do kernel para 1x1
+            nn.ReLU(True),
+            nn.Conv2d(64, 128, kernel_size=1, stride=1, padding=0),  # Outra camada 1x1
+            nn.ReLU(True),
+            nn.Conv2d(128, 64, kernel_size=1, stride=1, padding=0),  # Reduzir para 64 canais
+            nn.ReLU(True),
+            nn.ConvTranspose2d(64, 3, kernel_size=1, stride=1, padding=0),  # Mantém 1x1 nas transposições
+            nn.Tanh(),  # Saída entre [-1, 1]
+        )
+
+    def forward(self, x):
+        return self.main(x)
+
+class Discriminator(nn.Module):
+    def __init__(self):
+        super(Discriminator, self).__init__()
+        self.main = nn.Sequential(
+            nn.Conv2d(3, 64, kernel_size=4, stride=2, padding=1),
+            nn.LeakyReLU(0.2, True),
+            nn.Conv2d(64, 1, kernel_size=4, padding=1),
+            nn.Sigmoid(),  # Saída entre [0, 1]
+        )
+
+    def forward(self, x):
+        return self.main(x)
+
+# Inicializar os modelos
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+G_AB = Generator().to(device)
+G_BA = Generator().to(device)
+D_A = Discriminator().to(device)
+D_B = Discriminator().to(device)
+
+# Inicializar otimizadores
+optimizer_G = torch.optim.Adam(list(G_AB.parameters()) + list(G_BA.parameters()), lr=2e-4, betas=(0.5, 0.999))
+optimizer_D_A = torch.optim.Adam(D_A.parameters(), lr=2e-4, betas=(0.5, 0.999))
+optimizer_D_B = torch.optim.Adam(D_B.parameters(), lr=2e-4, betas=(0.5, 0.999))
+
+# Definir funções de perda
+criterion_GAN = nn.MSELoss()
+criterion_cycle = nn.L1Loss()
+
+# Buffers para resultados reais e falsos
+real_label = 1.0
+fake_label = 0.0
+
+# Carregar o checkpoint, se disponível
+iteration = 0  # Inicializar contador de iterações
+
+if checkpoint_path and not start_new_model:
+    if os.path.exists(checkpoint_path):
+        checkpoint = torch.load(checkpoint_path)
+        G_AB.load_state_dict(checkpoint['G_AB'])
+        G_BA.load_state_dict(checkpoint['G_BA'])
+        D_A.load_state_dict(checkpoint['D_A'])
+        D_B.load_state_dict(checkpoint['D_B'])
+        optimizer_G.load_state_dict(checkpoint['optimizer_G'])
+        optimizer_D_A.load_state_dict(checkpoint['optimizer_D_A'])
+        optimizer_D_B.load_state_dict(checkpoint['optimizer_D_B'])
+        iteration = checkpoint['iteration']
+        print(f'Modelo carregado de {checkpoint_path}, retomando de {iteration} iterações.')
+    else:
+        print(f'Checkpoint {checkpoint_path} não encontrado, começando o treinamento do zero.')
+else:
+    print('Nenhum checkpoint carregado, começando o treinamento do zero.')
+
+# Variáveis de controle
+stop_training = False
+update_display = False  # Controla se a janela deve ser atualizada
+
+# Criar janela OpenCV
+cv2.namedWindow('CycleGAN Treinamento', cv2.WINDOW_NORMAL)
+window_width = 1280  # Largura da janela
+window_height = int(window_width * 9 / 16)  # Altura com base na proporção 16:9
+cv2.resizeWindow('CycleGAN Treinamento', window_width, window_height)
+
+print("Pressione 'p' para atualizar a visualização, 's' para salvar os modelos, 'q' para sair.")
+
+# Loop de treinamento
+while not stop_training:
+    for i, batch in enumerate(dataloader):
+        if stop_training:
+            break
+
+        # Imagens reais dos domínios A e B
+        real_A = batch['A'].to(device)
+        real_B = batch['B'].to(device)
+
+        # Treinar geradores G_AB e G_BA
+        optimizer_G.zero_grad()
+
+        # Identidade
+        identity_B = G_AB(real_B)
+        loss_identity_B = criterion_cycle(identity_B, real_B) * 5.0
+
+        identity_A = G_BA(real_A)
+        loss_identity_A = criterion_cycle(identity_A, real_A) * 5.0
+
+        # Ganho adversário
+        fake_B = G_AB(real_A)
+        pred_fake = D_B(fake_B)
+        target_real = torch.ones_like(pred_fake).to(device)
+        loss_GAN_AB = criterion_GAN(pred_fake, target_real)
+
+        fake_A = G_BA(real_B)
+        pred_fake = D_A(fake_A)
+        target_real = torch.ones_like(pred_fake).to(device)
+        loss_GAN_BA = criterion_GAN(pred_fake, target_real)
+
+        # Ciclo de consistência
+        recovered_A = G_BA(fake_B)
+        loss_cycle_A = criterion_cycle(recovered_A, real_A) * 10.0
+
+        recovered_B = G_AB(fake_A)
+        loss_cycle_B = criterion_cycle(recovered_B, real_B) * 10.0
+
+        # Soma das perdas
+        loss_G = loss_identity_A + loss_identity_B + loss_GAN_AB + loss_GAN_BA + loss_cycle_A + loss_cycle_B
+        loss_G.backward()
+        optimizer_G.step()
+
+        # Treinar discriminador D_A
+        optimizer_D_A.zero_grad()
+
+        # Real
+        pred_real = D_A(real_A)
+        target_real = torch.ones_like(pred_real).to(device)
+        loss_D_real = criterion_GAN(pred_real, target_real)
+
+        # Falso
+        pred_fake = D_A(fake_A.detach())
+        target_fake = torch.zeros_like(pred_fake).to(device)
+        loss_D_fake = criterion_GAN(pred_fake, target_fake)
+
+        # Soma das perdas
+        loss_D_A = (loss_D_real + loss_D_fake) * 0.5
+        loss_D_A.backward()
+        optimizer_D_A.step()
+
+        # Treinar discriminador D_B
+        optimizer_D_B.zero_grad()
+
+        # Real
+        pred_real = D_B(real_B)
+        target_real = torch.ones_like(pred_real).to(device)
+        loss_D_real = criterion_GAN(pred_real, target_real)
+
+        # Falso
+        pred_fake = D_B(fake_B.detach())
+        target_fake = torch.zeros_like(pred_fake).to(device)
+        loss_D_fake = criterion_GAN(pred_fake, target_fake)
+
+        # Soma das perdas
+        loss_D_B = (loss_D_real + loss_D_fake) * 0.5
+        loss_D_B.backward()
+        optimizer_D_B.step()
+
+        iteration += 1
+
+        # Capturar teclas
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('p'):
+            update_display = True  # Ativar atualização da janela
+            print(f"Atualizando visualização na iteração {iteration}.")
+        elif key == ord('s'):
+            # Salvar os modelos
+            torch.save({
+                'G_AB': G_AB.state_dict(),
+                'G_BA': G_BA.state_dict(),
+                'D_A': D_A.state_dict(),
+                'D_B': D_B.state_dict(),
+                'optimizer_G': optimizer_G.state_dict(),
+                'optimizer_D_A': optimizer_D_A.state_dict(),
+                'optimizer_D_B': optimizer_D_B.state_dict(),
+                'iteration': iteration
+            }, checkpoint_path)
+            print(f'Modelos salvos em {checkpoint_path}')
+        elif key == ord('e'):
+            with torch.no_grad():
+                # Salvar a imagem gerada no domínio B (transformação do modelo G_BA)
+                fake_A_img = fake_A.cpu().squeeze().permute(1, 2, 0).numpy()
+                # Desnormalizar e converter para valores de pixel válidos (0-255)
+                fake_A_img = ((fake_A_img + 1) * 0.5 * 255).astype(np.uint8)
+                img_pil = Image.fromarray(fake_A_img)
+                save_image(img_pil)
+        elif key == ord('q'):
+            stop_training = True
+            break
+
+        # Atualizar e exibir a janela apenas se update_display for True
+        if update_display:
+            with torch.no_grad():
+                # Converter tensores para imagens
+                real_A_img = real_A.cpu().squeeze().permute(1, 2, 0).numpy()
+                fake_B_img = fake_B.cpu().squeeze().permute(1, 2, 0).numpy()
+                real_B_img = real_B.cpu().squeeze().permute(1, 2, 0).numpy()
+                fake_A_img = fake_A.cpu().squeeze().permute(1, 2, 0).numpy()
+
+                # Desnormalizar
+                real_A_img = ((real_A_img + 1) * 0.5 * 255).astype(np.uint8)
+                fake_B_img = ((fake_B_img + 1) * 0.5 * 255).astype(np.uint8)
+                real_B_img = ((real_B_img + 1) * 0.5 * 255).astype(np.uint8)
+                fake_A_img = ((fake_A_img + 1) * 0.5 * 255).astype(np.uint8)
+
+                # Combinar imagens lado a lado
+                top_row = np.hstack((real_A_img, fake_B_img))
+                bottom_row = np.hstack((real_B_img, fake_A_img))
+                combined_img = np.vstack((top_row, bottom_row))
+                combined_img = cv2.cvtColor(combined_img, cv2.COLOR_RGB2BGR)
+
+                # Redimensionar a imagem combinada para caber na janela 16:9
+                combined_height, combined_width = combined_img.shape[:2]
+                aspect_ratio = combined_width / combined_height
+                window_aspect_ratio = window_width / window_height
+
+                if aspect_ratio > window_aspect_ratio:
+                    # Ajustar altura com base na largura
+                    new_width = window_width
+                    new_height = int(window_width / aspect_ratio)
+                else:
+                    # Ajustar largura com base na altura
+                    new_height = window_height
+                    new_width = int(window_height * aspect_ratio)
+
+                combined_img_resized = cv2.resize(combined_img, (new_width, new_height))
+
+                # Adicionar bordas para manter proporção 16:9
+                delta_w = window_width - new_width
+                delta_h = window_height - new_height
+                top, bottom = delta_h // 2, delta_h - (delta_h // 2)
+                left, right = delta_w // 2, delta_w - (delta_w // 2)
+                color = [0, 0, 0]
+                combined_img_padded = cv2.copyMakeBorder(combined_img_resized, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)
+
+                # Adicionar texto com número de iterações e perdas
+                cv2.putText(combined_img_padded, f'Iteracao: {iteration}', (10, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                cv2.putText(combined_img_padded, f'Loss G: {loss_G.item():.4f}', (10, 60),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+
+                # Mostrar imagem
+                cv2.imshow('CycleGAN Treinamento', combined_img_padded)
+                cv2.waitKey(1)
+
+            update_display = False  # Resetar flag de atualização
+
+# Salvar os modelos ao final
+torch.save({
+    'G_AB': G_AB.state_dict(),
+    'G_BA': G_BA.state_dict(),
+    'D_A': D_A.state_dict(),
+    'D_B': D_B.state_dict(),
+    'optimizer_G': optimizer_G.state_dict(),
+    'optimizer_D_A': optimizer_D_A.state_dict(),
+    'optimizer_D_B': optimizer_D_B.state_dict(),
+    'iteration': iteration
+}, checkpoint_path)
+print(f'Modelos salvos em {checkpoint_path}')
+
+# Fechar janelas OpenCV
+cv2.destroyAllWindows()

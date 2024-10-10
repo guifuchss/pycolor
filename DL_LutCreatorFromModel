@@ -1,0 +1,153 @@
+import os
+import numpy as np
+import torch
+import torch.nn as nn
+import tkinter as tk
+from tkinter import filedialog, messagebox
+
+# Definir a classe Generator exatamente como no treinamento
+class Generator(nn.Module):
+    def __init__(self):
+        super(Generator, self).__init__()
+        self.main = nn.Sequential(
+            nn.Conv2d(3, 64, kernel_size=1, stride=1, padding=0),  # Camada 1
+            nn.ReLU(True),
+            nn.Conv2d(64, 128, kernel_size=1, stride=1, padding=0),  # Camada 2
+            nn.ReLU(True),
+            nn.Conv2d(128, 64, kernel_size=1, stride=1, padding=0),  # Camada 3
+            nn.ReLU(True),
+            nn.ConvTranspose2d(64, 3, kernel_size=1, stride=1, padding=0),  # Camada 4
+            nn.Tanh(),  # Saída entre [-1, 1]
+        )
+
+    def forward(self, x):
+        return self.main(x)
+
+# Variáveis para armazenar as seleções do usuário
+checkpoint_path = ''
+lut_file = ''
+
+# Função para selecionar o modelo
+def select_model():
+    global checkpoint_path
+    checkpoint_path = filedialog.askopenfilename(title="Selecionar Modelo", filetypes=[("Modelos PyTorch", "*.pth"), ("Todos os Arquivos", "*.*")])
+    if checkpoint_path:
+        messagebox.showinfo("Modelo Selecionado", f"Modelo carregado: {checkpoint_path}")
+    else:
+        messagebox.showwarning("Nenhum Modelo Selecionado", "Nenhum modelo foi selecionado.")
+
+# Função para selecionar onde salvar a LUT
+def select_lut_location():
+    global lut_file
+    lut_file = filedialog.asksaveasfilename(title="Salvar LUT", defaultextension=".cube", filetypes=[("Arquivos LUT", "*.cube"), ("Todos os Arquivos", "*.*")])
+    if lut_file:
+        messagebox.showinfo("Localização da LUT", f"A LUT será salva em: {lut_file}")
+    else:
+        messagebox.showwarning("Nenhuma Localização Selecionada", "Nenhum local foi selecionado para salvar a LUT.")
+
+# Função para iniciar o processo
+def start_process():
+    if not checkpoint_path:
+        messagebox.showerror("Informação Faltando", "Por favor, selecione o modelo.")
+        return
+    if not lut_file:
+        messagebox.showerror("Informação Faltando", "Por favor, selecione onde salvar a LUT.")
+        return
+    # Fechar a janela e continuar
+    root.destroy()
+
+# Criar a janela principal
+root = tk.Tk()
+root.title("Gerar LUT a partir de Modelo")
+
+# Criar botões
+btn_select_model = tk.Button(root, text="Selecionar Modelo", command=select_model)
+btn_select_lut = tk.Button(root, text="Selecionar Local e Nome da LUT", command=select_lut_location)
+btn_start = tk.Button(root, text="Gerar LUT", command=start_process)
+
+btn_select_model.pack(pady=10)
+btn_select_lut.pack(pady=10)
+btn_start.pack(pady=20)
+
+# Iniciar o loop da interface gráfica
+root.mainloop()
+
+# Após fechar a janela, continuar com o processamento
+if not checkpoint_path or not lut_file:
+    print("Operação cancelada pelo usuário.")
+    exit()
+
+# Definir o dispositivo
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+# Instanciar o modelo G_BA
+G_BA = Generator().to(device)
+
+# Carregar o checkpoint
+if os.path.exists(checkpoint_path):
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    G_BA.load_state_dict(checkpoint['G_BA'])
+    print('Pesos do modelo G_BA carregados com sucesso.')
+else:
+    print(f'Checkpoint {checkpoint_path} não encontrado.')
+    exit(1)
+
+# Definir o tamanho da LUT
+grid_size = 65
+
+# Gerar valores uniformemente espaçados entre 0 e 1
+values = np.linspace(0, 1, grid_size, dtype=np.float32)
+
+# Criar uma grade 3D de valores RGB
+rr, gg, bb = np.meshgrid(values, values, values, indexing='ij')
+
+# Combinar as grades em um array de cores
+colors = np.stack([rr.flatten(), gg.flatten(), bb.flatten()], axis=1)  # Shape: (N, 3)
+
+# Normalizar para o intervalo [-1, 1]
+normalized_colors = (colors - 0.5) / 0.5  # Equivalente a (value - 0.5) * 2
+
+# Converter para tensor PyTorch
+inputs = torch.tensor(normalized_colors, dtype=torch.float32).to(device)
+
+# Adicionar dimensões para (N, C, H, W)
+inputs = inputs.unsqueeze(2).unsqueeze(3)  # Forma (N, 3, 1, 1)
+
+# Processar em lotes
+batch_size = 1024
+outputs = []
+
+model = G_BA.eval()  # Modo de avaliação
+
+with torch.no_grad():
+    for i in range(0, inputs.shape[0], batch_size):
+        batch = inputs[i:i+batch_size]
+        output = model(batch)
+        outputs.append(output.cpu())
+
+# Concatenar todas as saídas
+outputs = torch.cat(outputs, dim=0)  # Forma: (N, 3, 1, 1)
+
+# Remover dimensões extras
+outputs = outputs.squeeze(3).squeeze(2)  # Forma: (N, 3)
+
+# Desnormalizar para o intervalo [0, 1]
+outputs = (outputs * 0.5) + 0.5  # Equivalente a (value / 2) + 0.5
+
+# Garantir que os valores estão no intervalo [0, 1]
+outputs = np.clip(outputs.numpy(), 0, 1)
+
+# Reshape dos dados para (grid_size, grid_size, grid_size, 3)
+lut_data = outputs.reshape(grid_size, grid_size, grid_size, 3)
+
+# Criar a LUT3D usando a biblioteca colour
+from colour.io import LUT3D, write_LUT
+
+lut = LUT3D(table=lut_data, name='MyLUT', domain=[[0, 0, 0], [1, 1, 1]])
+
+# Salvar a LUT
+try:
+    write_LUT(lut, lut_file)
+    print(f'LUT salva em {lut_file}')
+except Exception as e:
+    print(f'Ocorreu um erro ao salvar a LUT: {e}')
