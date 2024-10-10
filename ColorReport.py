@@ -22,7 +22,7 @@ class ColorPaletteApp:
         
         # Center the window on the screen
         window_width = 1200    # Define the desired width of the window
-        window_height = 800  # Define the desired height of the window
+        window_height = 900  # Define the desired height of the window
         screen_width = self.root.winfo_screenwidth()
         screen_height = self.root.winfo_screenheight()
         position_top = int(screen_height / 2 - window_height / 2)
